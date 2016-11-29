@@ -87,6 +87,8 @@ var directives = []string{
 	"rewrite",
 	"loadbalance",
 
+	"pfdns",
+
 	"dnssec",
 	"file",
 	"auto",
@@ -95,4 +97,5 @@ var directives = []string{
 	"kubernetes",
 	"proxy",
 	"whoami",
+	"blackhole",
 }
