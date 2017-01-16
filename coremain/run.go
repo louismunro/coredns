@@ -2,11 +2,14 @@
 package coremain
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"runtime"
 	"strconv"
@@ -49,6 +52,7 @@ func init() {
 	flag.BoolVar(&dnsserver.Quiet, "quiet", false, "Quiet mode (no initialization output)")
 
 	caddy.RegisterCaddyfileLoader("flag", caddy.LoaderFunc(confLoader))
+	caddy.RegisterCaddyfileLoader("pfconfig", caddy.LoaderFunc(pfconfLoader))
 	caddy.SetDefaultCaddyfileLoader("default", caddy.LoaderFunc(defaultLoader))
 }
 
@@ -125,6 +129,9 @@ func confLoader(serverType string) (caddy.Input, error) {
 		return nil, nil
 	}
 
+	if conf[:4] == "http" { // defer to pfconfLoader
+		return nil, nil
+	}
 	if conf == "stdin" {
 		return caddy.CaddyfileFromPipe(os.Stdin, "dns")
 	}
@@ -138,6 +145,49 @@ func confLoader(serverType string) (caddy.Input, error) {
 		Filepath:       conf,
 		ServerTypeName: serverType,
 	}, nil
+}
+
+// pfconfLoader loads the Corefile from json returned from a call to pfconfig
+func pfconfLoader(serverType string) (caddy.Input, error) {
+	type jsonreply struct {
+		Contents string
+	}
+
+	if conf == "" {
+		return nil, nil
+	}
+	if conf[:4] == "http" {
+		log.Println("Loading config from " + conf)
+		r, err := http.Get(conf)
+		if err != nil {
+			return nil, err
+		}
+		if r.StatusCode != 200 {
+			return nil, errors.New(r.Status)
+		}
+
+		var corefile jsonreply
+		var b bytes.Buffer
+		n, err := b.ReadFrom(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if n != r.ContentLength {
+			return nil, errors.New("Incorrect ContentLength read from pfconfig reply. Skipping pfconfig.")
+		}
+
+		if err = json.Unmarshal(b.Bytes(), &corefile); err != nil {
+			return nil, err
+		}
+
+		return caddy.CaddyfileInput{
+			Contents:       []byte(corefile.Contents),
+			Filepath:       conf,
+			ServerTypeName: serverType,
+		}, nil
+	}
+	// we were not asked to get config from a url
+	return nil, nil
 }
 
 // defaultLoader loads the Corefile from the current working directory.
