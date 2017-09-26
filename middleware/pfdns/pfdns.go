@@ -3,17 +3,25 @@
 package pfdns
 
 import (
+	"database/sql"
+	"fmt"
 	"net"
 
 	"github.com/miekg/coredns/middleware"
 	"github.com/miekg/coredns/request"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/miekg/dns"
 	"golang.org/x/net/context"
 )
 
 type pfdns struct {
 	RedirectIp net.IP
+	Enforce    bool
+	Db         *sql.DB
+	Ip4log     *sql.Stmt // prepared statement for ip4log queries
+	Ip6log     *sql.Stmt // prepared statement for ip6log queries
+	Nodedb     *sql.Stmt // prepared statement for node table queries
 	Next       middleware.Handler
 }
 
@@ -32,6 +40,45 @@ func (pf pfdns) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	ip := pf.RedirectIp
 	var rr dns.RR
+
+	if pf.Enforce {
+
+		var ipVersion int
+		srcIp := state.IP()
+		bIp := net.ParseIP(srcIp)
+		if bIp.To4() == nil {
+			ipVersion = 6
+		} else {
+			ipVersion = 4
+		}
+
+		var mac string
+		if ipVersion == 4 {
+			err := pf.Ip4log.QueryRow(srcIp).Scan(&mac)
+			if err != nil {
+				fmt.Printf("ERROR pfdns database query returned %s\n", err)
+				return 0, nil
+			}
+		} else {
+			err := pf.Ip6log.QueryRow(srcIp).Scan(&mac)
+			if err != nil {
+				fmt.Printf("ERROR pfdns database query returned %s\n", err)
+				return 0, nil
+			}
+		}
+
+		var status string
+		err := pf.Nodedb.QueryRow(mac).Scan(&status)
+		if err != nil {
+			fmt.Printf("ERROR pfdns database query returned %s\n", err)
+			return 0, nil
+		}
+
+		// Defer to the proxy middleware if the device is registered
+		if status == "reg" {
+			return 0, nil
+		}
+	}
 
 	switch state.Family() {
 	case 1:
