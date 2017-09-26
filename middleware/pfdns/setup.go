@@ -114,7 +114,7 @@ func readConfig(ctx context.Context) pfconfigdriver.PfconfigDatabase {
 }
 
 func connectDB(configDatabase pfconfigdriver.PfconfigDatabase) (*sql.DB, error) {
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@%s/%s", configDatabase.DBUser, configDatabase.DBPassword, configDatabase.DBHost, configDatabase.DBName))
+	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/%s", configDatabase.DBUser, configDatabase.DBPassword, configDatabase.DBHost, configDatabase.DBName))
 	if err != nil {
 		return nil, err
 	}
