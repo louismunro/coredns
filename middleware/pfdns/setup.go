@@ -1,28 +1,15 @@
 package pfdns
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql"
-
-	"github.com/inverse-inc/packetfence/go/pfconfigdriver"
 	"github.com/miekg/coredns/core/dnsserver"
 	"github.com/miekg/coredns/middleware"
 
 	"github.com/mholt/caddy"
 )
-
-type dbConf struct {
-	DBHost     string `json:"host"`
-	DBPort     string `json:"port"`
-	DBUser     string `json:"user"`
-	DBPassword string `json:"pass"`
-	DB         string `json:"db"`
-}
 
 func init() {
 	caddy.RegisterPlugin("pfdns", caddy.Plugin{
@@ -32,6 +19,7 @@ func init() {
 }
 
 func setuppfdns(c *caddy.Controller) error {
+	var pf *pfdns = &pfdns{}
 	var ip net.IP
 	enforce := false
 
@@ -56,6 +44,33 @@ func setuppfdns(c *caddy.Controller) error {
 				if ip == nil {
 					return c.Errf("Invalid IP address '%s'", c.Val())
 				}
+			case "blackhole":
+				// The possible values are:
+				// blackhole (using the defaults)
+				// blackhole disabled (or false)
+				// blackhole $CNAME $IP
+				pf.BhIp = net.ParseIP("127.0.0.1")
+				pf.BhCname = "localhost.localdomain."
+				pf.Bh = true
+
+				args := c.RemainingArgs()
+				switch len(args) {
+				case 1:
+					if (strings.ToUpper(args[1]) == "DISABLED") || (strings.ToUpper(args[1]) == "FALSE") {
+						pf.Bh = false
+					} else {
+						return c.Errf("pfdns: blackhole incorrect value type name or value type not supported: '%s'", args[1])
+					}
+				case 2:
+					pf.BhCname = args[0]
+					if pf.BhCname[len(pf.BhCname)-1] != '.' {
+						return c.Errf("pfdns: blackhole domains must be dot terminated and fully qualified")
+					}
+					pf.BhIp = net.ParseIP(args[1])
+					if pf.BhIp == nil {
+						return middleware.Error("blackhole", c.Err("unparseable IP address argument"))
+					}
+				}
 			default:
 				return c.Errf("Unknown keyword '%s'", c.Val())
 			}
@@ -65,58 +80,20 @@ func setuppfdns(c *caddy.Controller) error {
 		}
 	}
 
-	var ip4log, ip6log, nodedb *sql.Stmt
-	var db *sql.DB
-	var ctx = context.Background()
 	if enforce {
-		configDatabase := readConfig(ctx)
-		db, err := connectDB(configDatabase)
-		if err != nil {
-			return c.Errf("pfdns: database connection error: %s", err)
+		if err := pf.DbInit(); err != nil {
+			return c.Errf("pfdns: unable to initialize database connection")
 		}
-		ip4log, err = db.Prepare("Select MAC from ip4log where IP = ? ")
-		if err != nil {
-			return c.Errf("pfdns: database prepared statement error: %s", err)
-		}
-		ip6log, err = db.Prepare("Select MAC from ip6log where IP = ? ")
-		if err != nil {
-			return c.Errf("pfdns: database prepared statement error: %s", err)
-		}
-		nodedb, err = db.Prepare("Select STATUS from node where MAC = ? ")
-		if err != nil {
-			return c.Errf("pfdns: database prepared statement error: %s", err)
-		}
+		fmt.Println("pfdns: Enforcement mode enabled.")
 	}
 
-	dnsserver.GetConfig(c).AddMiddleware(func(next middleware.Handler) middleware.Handler {
-		return pfdns{
-			RedirectIp: ip,
-			Enforce:    enforce,
-			Db:         db,
-			Ip4log:     ip4log,
-			Ip6log:     ip6log,
-			Nodedb:     nodedb,
-			Next:       next,
-		}
-	})
+	dnsserver.GetConfig(c).AddMiddleware(
+		func(next middleware.Handler) middleware.Handler {
+			pf.RedirectIp = ip
+			pf.Enforce = enforce
+			pf.Next = next
+			return pf
+		})
 
 	return nil
-}
-
-func readConfig(ctx context.Context) pfconfigdriver.PfconfigDatabase {
-	var sections pfconfigdriver.PfconfigDatabase
-	sections.PfconfigNS = "config::Pf"
-	sections.PfconfigMethod = "hash_element"
-	sections.PfconfigHashNS = "database"
-
-	pfconfigdriver.FetchDecodeSocket(ctx, &sections)
-	return sections
-}
-
-func connectDB(configDatabase pfconfigdriver.PfconfigDatabase) (*sql.DB, error) {
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/%s", configDatabase.DBUser, configDatabase.DBPassword, configDatabase.DBHost, configDatabase.DBName))
-	if err != nil {
-		return nil, err
-	}
-	return db, nil
 }
